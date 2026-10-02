@@ -43,16 +43,24 @@ embeddings = model.encode(
     normalize_embeddings=False
 )
 
-print("Embedding shape:")
-print(embeddings.shape)
-
-# 最后统一 FP32 normalize
+# 转为 FP32
 embeddings = embeddings.astype(np.float32)
+
+# 手动进行 L2 normalization
 embeddings /= np.linalg.norm(
     embeddings,
     axis=1,
     keepdims=True
 )
+
+print("Embedding shape:")
+print(embeddings.shape)
+
+print("\nEmbedding dtype:")
+print(embeddings.dtype)
+
+print("\nEmbedding norms:")
+print(np.linalg.norm(embeddings, axis=1))
 
 
 # ============================================================
