@@ -5,39 +5,45 @@ import torch.nn.functional as F
 
 class EEGEncoder(nn.Module):
     """
-    NICE TSConv EEG Encoder（不包含 SA / GA）
+    NICE TSConv EEG Encoder（定长 EEG 版本，不使用 padding mask）
 
     输入:
         eeg: (B, C, T)
 
+    默认:
+        C = 125
+        k = 40
+
     输出:
         eeg_embedding: (B, embedding_dim)
-
-    默认:
-        C = 128
-        k = 40
-        embedding_dim = 1024
 
     整体结构:
 
         EEG
-         ↓
-        NICE TSConv Backbone
-         ↓
-        EEG feature
-        (B, 40)
-         ↓
+        (B, 125, T)
+            ↓
+        NICE TSConv
+            ↓
+        (B, 40, 1, T')
+            ↓
+        1×1 Conv
+            ↓
+        Flatten
+            ↓
+        (B, 40 * T')
+            ↓
         MLP Projection
-        40 → 512 → 1024
-         ↓
+        flatten_dim → 512 → 1024
+            ↓
         L2 Normalize
-         ↓
+            ↓
         (B, 1024)
     """
 
     def __init__(
         self,
-        n_chans: int = 128,
+        n_chans: int,
+        n_times: int,
         k: int = 40,
         m1: int = 25,
         m2: int = 51,
@@ -48,12 +54,74 @@ class EEGEncoder(nn.Module):
     ):
         super().__init__()
 
+        # ====================================================
+        # 1. 参数检查
+        # ====================================================
+
+        if n_chans <= 0:
+            raise ValueError("n_chans must be positive")
+
+        if n_times <= 0:
+            raise ValueError("n_times must be positive")
+
+        if k <= 0:
+            raise ValueError("k must be positive")
+
+        if m1 <= 0 or m2 <= 0 or s <= 0:
+            raise ValueError("m1, m2 and s must be positive")
+
         self.n_chans = n_chans
-        self.feature_dim = k
+        self.n_times = n_times
+        self.k = k
         self.embedding_dim = embedding_dim
 
         # ====================================================
-        # 1. NICE TSConv Backbone
+        # 2. 计算 TSConv 输出时间长度
+        # ====================================================
+
+        # Temporal Conv:
+        #
+        # T1 = T - m1 + 1
+        #
+        t_after_conv = n_times - m1 + 1
+
+        if t_after_conv <= 0:
+            raise ValueError(
+                f"n_times={n_times} is too short for m1={m1}"
+            )
+
+        # AvgPool:
+        #
+        # T2 = floor((T1 - m2) / s) + 1
+        #
+        t_after_pool = (
+            (t_after_conv - m2) // s
+            + 1
+        )
+
+        if t_after_pool <= 0:
+            raise ValueError(
+                "EEG sequence is too short after temporal convolution "
+                f"for AvgPool: n_times={n_times}, m1={m1}, "
+                f"m2={m2}, s={s}"
+            )
+
+        self.temporal_feature_length = t_after_pool
+
+        # TSConv 最终:
+        #
+        # (B, k, 1, T2)
+        #
+        # Flatten:
+        #
+        # (B, k * T2)
+        #
+        self.feature_dim = (
+            k * t_after_pool
+        )
+
+        # ====================================================
+        # 3. NICE TSConv Backbone
         # ====================================================
 
         self.tsconv = nn.Sequential(
@@ -61,54 +129,55 @@ class EEGEncoder(nn.Module):
             # ------------------------------------------------
             # Temporal Convolution
             #
-            # 输入:
             # (B, 1, C, T)
             #
-            # 输出:
-            # (B, k, C, T')
+            # →
+            #
+            # (B, k, C, T - m1 + 1)
             # ------------------------------------------------
+
             nn.Conv2d(
                 in_channels=1,
                 out_channels=k,
                 kernel_size=(1, m1),
                 stride=(1, 1),
-                bias=False,
             ),
-
-            nn.BatchNorm2d(k),
 
             # ------------------------------------------------
             # Temporal Average Pooling
             #
-            # 主要作用:
-            # 1. 时间降采样
-            # 2. 时间平滑
+            # NICE 原版:
             #
-            # (B, k, C, T')
-            # →
-            # (B, k, C, T'')
+            # kernel_size = (1, 51)
+            # stride      = (1, 5)
             # ------------------------------------------------
+
             nn.AvgPool2d(
                 kernel_size=(1, m2),
                 stride=(1, s),
             ),
 
+            nn.BatchNorm2d(k),
+
+            nn.ELU(),
+
             # ------------------------------------------------
             # Spatial Convolution
             #
-            # 卷积核高度 = n_chans
-            # 一次融合所有 EEG 电极
+            # 卷积核跨越所有 EEG 电极:
             #
-            # (B, k, C, T'')
+            # (B, k, 125, T')
+            #
             # →
-            # (B, k, 1, T'')
+            #
+            # (B, k, 1, T')
             # ------------------------------------------------
+
             nn.Conv2d(
                 in_channels=k,
                 out_channels=k,
                 kernel_size=(n_chans, 1),
                 stride=(1, 1),
-                bias=False,
             ),
 
             nn.BatchNorm2d(k),
@@ -119,20 +188,33 @@ class EEGEncoder(nn.Module):
         )
 
         # ====================================================
-        # 2. MLP Projection Head
+        # 4. NICE 中 PatchEmbedding 的 1×1 Conv
+        # ====================================================
+
+        self.patch_projection = nn.Conv2d(
+            in_channels=k,
+            out_channels=k,
+            kernel_size=(1, 1),
+            stride=(1, 1),
+        )
+
+        # ====================================================
+        # 5. EEG → Text Shared Space Projection
         #
-        # NICE TSConv feature:
-        #     (B, 40)
+        # flatten_dim → 512 → 1024
         #
-        # →
+        # 例如:
         #
-        # Shared embedding:
-        #     (B, 1024)
+        # T = 250:
+        # flatten_dim = 1440
+        #
+        # 如果 T 更长:
+        # flatten_dim 自动重新计算
         # ====================================================
 
         self.eeg_projection = nn.Sequential(
             nn.Linear(
-                k,
+                self.feature_dim,
                 projection_hidden_dim,
             ),
 
@@ -144,67 +226,103 @@ class EEGEncoder(nn.Module):
             ),
         )
 
-
     def forward(self, eeg):
         """
-        eeg:
-            (B, C, T)
+        Parameters
+        ----------
+        eeg : torch.Tensor
+            shape = (B, C, T)
 
-        return:
-            (B, embedding_dim)
+        Returns
+        -------
+        torch.Tensor
+            shape = (B, embedding_dim)
         """
 
         # ====================================================
-        # 1. 增加 Conv2d 所需要的 channel 维度
+        # 1. 输入检查
+        # ====================================================
+
+        if eeg.ndim != 3:
+            raise ValueError(
+                "EEG input must have shape (B, C, T), "
+                f"but got {tuple(eeg.shape)}"
+            )
+
+        if eeg.shape[1] != self.n_chans:
+            raise ValueError(
+                f"Expected {self.n_chans} EEG channels, "
+                f"but got {eeg.shape[1]}"
+            )
+
+        if eeg.shape[2] != self.n_times:
+            raise ValueError(
+                f"Expected fixed EEG length {self.n_times}, "
+                f"but got {eeg.shape[2]}"
+            )
+
+        # ====================================================
+        # 2. 增加 Conv2d 输入维
         #
         # (B, C, T)
+        #
         # →
+        #
         # (B, 1, C, T)
         # ====================================================
 
         eeg = eeg.unsqueeze(1)
 
         # ====================================================
-        # 2. NICE TSConv
+        # 3. NICE TSConv
         #
         # (B, 1, C, T)
+        #
         # →
+        #
         # (B, k, 1, T')
         # ====================================================
 
         features = self.tsconv(eeg)
 
         # ====================================================
-        # 3. 去掉空间维
+        # 4. 1×1 projection
+        #
+        # shape 不变:
         #
         # (B, k, 1, T')
-        # →
-        # (B, k, T')
         # ====================================================
 
-        features = features.squeeze(2)
+        features = self.patch_projection(
+            features
+        )
 
         # ====================================================
-        # 4. 时间维全局平均
+        # 5. Flatten
         #
-        # (B, k, T')
-        # →
-        # (B, k)
+        # (B, k, 1, T')
         #
-        # 默认:
-        # (B, 40)
+        # →
+        #
+        # (B, k * T')
         # ====================================================
 
-        features = features.mean(dim=-1)
+        features = features.flatten(
+            start_dim=1
+        )
 
         # ====================================================
-        # 5. MLP Projection
+        # 6. MLP Projection
         #
-        # (B, 40)
+        # (B, feature_dim)
+        #
         # →
+        #
         # (B, 512)
+        #
         # →
-        # (B, 1024)
+        #
+        # (B, embedding_dim)
         # ====================================================
 
         embeddings = self.eeg_projection(
@@ -212,17 +330,9 @@ class EEGEncoder(nn.Module):
         )
 
         # ====================================================
-        # 6. L2 Normalize
+        # 7. L2 Normalize
         #
-        # 每个 embedding 满足:
-        #
-        # ||z||_2 ≈ 1
-        #
-        # 后面可直接使用:
-        #
-        # similarity = eeg @ text.T
-        #
-        # 计算 cosine similarity
+        # ||z||_2 = 1
         # ====================================================
 
         embeddings = F.normalize(
@@ -240,60 +350,57 @@ class EEGEncoder(nn.Module):
 
 if __name__ == "__main__":
 
-    # --------------------------------------------------------
-    # 模拟一个 batch 的 EEG
+    # ========================================================
+    # 假设你的预处理最后把所有 EEG 固定成 1500 个采样点
     #
-    # B = 8
-    # C = 128
-    # T = 1500
-    # --------------------------------------------------------
+    # 这里只是 demo。
+    # 最终改成你实际确定的固定长度即可。
+    # ========================================================
+
+    batch_size = 8
+    n_chans = 125
+    n_times = 1500
 
     eeg = torch.randn(
-        8,
-        128,
-        1500,
+        batch_size,
+        n_chans,
+        n_times,
     )
 
-    print("Input EEG:")
-    print(eeg.shape)
-
-    # --------------------------------------------------------
-    # 创建模型
-    # --------------------------------------------------------
-
     model = EEGEncoder(
-        n_chans=128,
+        n_chans=n_chans,
+        n_times=n_times,
 
-        # NICE TSConv
+        # NICE
         k=40,
         m1=25,
         m2=51,
         s=5,
+        drop_prob=0.5,
 
-        # Projection
+        # EEG → text embedding
         projection_hidden_dim=512,
         embedding_dim=1024,
-
-        drop_prob=0.5,
     )
 
-    # --------------------------------------------------------
-    # Forward
-    # --------------------------------------------------------
+    print("Input:")
+    print(eeg.shape)
+
+    print("\nTSConv temporal length:")
+    print(model.temporal_feature_length)
+
+    print("\nFlatten feature dimension:")
+    print(model.feature_dim)
 
     eeg_embeddings = model(eeg)
 
-    print("\nEEG embedding:")
+    print("\nOutput:")
     print(eeg_embeddings.shape)
 
-    # --------------------------------------------------------
-    # 检查 L2 norm
-    # --------------------------------------------------------
-
-    norms = torch.linalg.vector_norm(
-        eeg_embeddings,
-        dim=-1,
-    )
-
     print("\nEmbedding norms:")
-    print(norms)
+    print(
+        torch.linalg.vector_norm(
+            eeg_embeddings,
+            dim=-1,
+        )
+    )
