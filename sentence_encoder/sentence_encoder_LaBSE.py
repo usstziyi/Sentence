@@ -22,7 +22,10 @@ sentences = [
     "今天天气很好"
 ]
 
-embeddings = model.encode(sentences)
+embeddings = model.encode(
+    sentences,
+    normalize_embeddings=True
+)
 print(embeddings.shape)
 
 
