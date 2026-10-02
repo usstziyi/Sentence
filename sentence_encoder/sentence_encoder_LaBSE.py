@@ -24,11 +24,17 @@ sentences = [
 
 embeddings = model.encode(
     sentences,
-    normalize_embeddings=True
+    normalize_embeddings=False
 )
 print(embeddings.shape)
 
-
+# 最后统一 FP32 normalize
+embeddings = embeddings.astype(np.float32)
+embeddings /= np.linalg.norm(
+    embeddings,
+    axis=1,
+    keepdims=True
+)
 
 similarity = embeddings @ embeddings.T
 print(similarity)

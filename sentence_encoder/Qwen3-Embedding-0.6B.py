@@ -40,14 +40,19 @@ sentences = [
 
 embeddings = model.encode(
     sentences,
-    normalize_embeddings=True
+    normalize_embeddings=False
 )
 
 print("Embedding shape:")
 print(embeddings.shape)
 
-print("\nEmbeddings:")
-print(embeddings)
+# 最后统一 FP32 normalize
+embeddings = embeddings.astype(np.float32)
+embeddings /= np.linalg.norm(
+    embeddings,
+    axis=1,
+    keepdims=True
+)
 
 
 # ============================================================
