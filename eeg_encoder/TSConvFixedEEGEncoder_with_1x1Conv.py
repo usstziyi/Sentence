@@ -3,9 +3,9 @@ from torch import nn
 import torch.nn.functional as F
 
 
-class EEGEncoder_TSConv_without_1x1Conv(nn.Module):
+class TSConvFixedEEGEncoder_with_1x1Conv(nn.Module):
     """
-    NICE-inspired TSConv EEG Encoder
+    NICE TSConv EEG Encoder
     定长 EEG 版本，不使用 padding mask。
 
     输入:
@@ -31,7 +31,11 @@ class EEGEncoder_TSConv_without_1x1Conv(nn.Module):
         EEG
         (B, C, T)
             ↓
-        TSConv Backbone
+        NICE TSConv Backbone
+            ↓
+        (B, k, 1, T')
+            ↓
+        1×1 Feature Projection
             ↓
         (B, k, 1, T')
             ↓
@@ -46,16 +50,10 @@ class EEGEncoder_TSConv_without_1x1Conv(nn.Module):
             ↓
         (B, embedding_dim)
 
-    说明:
+    注意:
         这里采用固定长度 EEG，因此不需要 padding mask。
-
-        TSConv 输出中的时间维不做全局平均，而是直接保留后 Flatten，
-        从而保留时间位置上的特征信息。
-
-        与 NICE 原始 PatchEmbedding 相比，本实现删除了其中的 1×1 Conv
-        projection，直接使用后续 MLP 将 TSConv 特征映射到文本 embedding
-        空间，因此属于 NICE-inspired TSConv，而不是严格复现完整的
-        NICE PatchEmbedding。
+        TSConv 输出中的时间维不会做全局平均，而是直接保留并 Flatten，
+        这一点更接近 NICE 原始实现。
     """
 
     def __init__(
@@ -133,15 +131,18 @@ class EEGEncoder_TSConv_without_1x1Conv(nn.Module):
                 f"s={s}"
             )
 
-        # TSConv 最终时间长度 T'
+        # TSConv 最终的时间特征长度 T'
         self.temporal_feature_length = t_after_pool
+        
 
         # ----------------------------------------------------
         # TSConv 输出:
         #
         # (B, k, 1, T')
         #
-        # Flatten:
+        # 后续 1×1 Conv 不改变 shape。
+        #
+        # Flatten 后:
         #
         # (B, k × T')
         #
@@ -151,9 +152,10 @@ class EEGEncoder_TSConv_without_1x1Conv(nn.Module):
         # ----------------------------------------------------
 
         self.flatten_dim = k * self.temporal_feature_length
+        
 
         # ====================================================
-        # 3. NICE-inspired TSConv Backbone
+        # 3. NICE TSConv Backbone
         # ====================================================
 
         self.tsconv = nn.Sequential(
@@ -162,9 +164,11 @@ class EEGEncoder_TSConv_without_1x1Conv(nn.Module):
             # Temporal Convolution
             #
             # 输入:
+            #
             # (B, 1, C, T)
             #
             # 输出:
+            #
             # (B, k, C, T1)
             #
             # T1 = T - m1 + 1
@@ -181,12 +185,15 @@ class EEGEncoder_TSConv_without_1x1Conv(nn.Module):
             # Temporal Average Pooling
             #
             # 输入:
+            #
             # (B, k, C, T1)
             #
             # 输出:
+            #
             # (B, k, C, T')
             #
             # NICE 默认:
+            #
             # m2 = 51
             # s  = 5
             # ------------------------------------------------
@@ -205,13 +212,15 @@ class EEGEncoder_TSConv_without_1x1Conv(nn.Module):
             #
             # kernel height = n_chans
             #
-            # 一次跨越所有 EEG 电极，
-            # 将空间维 C 压缩为 1。
+            # 一次跨越全部 EEG 电极，
+            # 对所有空间通道进行融合。
             #
             # 输入:
+            #
             # (B, k, C, T')
             #
             # 输出:
+            #
             # (B, k, 1, T')
             # ------------------------------------------------
 
@@ -232,46 +241,50 @@ class EEGEncoder_TSConv_without_1x1Conv(nn.Module):
         )
 
         # ====================================================
-        # 4. EEG → Text Shared Space Projection
+        # 4. 1×1 Feature Projection
         # ====================================================
         #
-        # TSConv:
+        # 1×1 卷积，用来重新混合 TSConv 得到的 k 个特征通道。
+        # 对 TSConv 输出的 k 个特征通道进一步做线性组合。
+        #
+        # 输入:
         #
         # (B, k, 1, T')
         #
-        # Flatten:
+        # 输出:
+        #
+        # (B, k, 1, T')
+        #
+        # shape 不发生变化。
+        #
+        # 这一层对应 NICE PatchEmbedding 中的
+        # 1×1 convolution 部分。
+        # ====================================================
+
+        self.patch_projection = nn.Conv2d(
+            in_channels=k,
+            out_channels=k,
+            kernel_size=(1, 1),
+            stride=(1, 1),
+        )
+
+        # ====================================================
+        # 5. EEG → Text Shared Space Projection
+        # ====================================================
+        #
+        # Flatten 后:
         #
         # (B, flatten_dim)
         #
         # MLP:
         #
         # flatten_dim
-        #      ↓
+        #     ↓
         # projection_hidden_dim
-        #      ↓
+        #     ↓
         # embedding_dim
         #
-        #
-        # 例如在 NICE 参数下:
-        #
-        # k  = 40
-        # m1 = 25
-        # m2 = 51
-        # s  = 5
-        # T  = 250
-        #
-        # T1 = 250 - 25 + 1
-        #    = 226
-        #
-        # T' = floor((226 - 51) / 5) + 1
-        #    = 36
-        #
-        # flatten_dim
-        # = 40 × 36
-        # = 1440
-        #
-        # 如果 T 改变，
-        # flatten_dim 会自动重新计算。
+        # 如果 T 改变，flatten_dim 会自动重新计算。
         # ====================================================
 
         self.eeg_projection = nn.Sequential(
@@ -297,14 +310,14 @@ class EEGEncoder_TSConv_without_1x1Conv(nn.Module):
         Parameters
         ----------
         eeg:
-            EEG 输入:
+            EEG 输入，shape:
 
             (B, C, T)
 
         Returns
         -------
         torch.Tensor:
-            L2-normalized EEG embedding:
+            L2-normalized EEG embedding，shape:
 
             (B, embedding_dim)
         """
@@ -334,7 +347,7 @@ class EEGEncoder_TSConv_without_1x1Conv(nn.Module):
             )
 
         # ====================================================
-        # 2. 增加 Conv2d 输入通道维
+        # 2. 增加 Conv2d 所需要的输入通道维
         # ====================================================
         #
         # (B, C, T)
@@ -347,7 +360,7 @@ class EEGEncoder_TSConv_without_1x1Conv(nn.Module):
         eeg = eeg.unsqueeze(1)
 
         # ====================================================
-        # 3. TSConv Backbone
+        # 3. NICE TSConv Backbone
         # ====================================================
         #
         # (B, 1, C, T)
@@ -357,12 +370,25 @@ class EEGEncoder_TSConv_without_1x1Conv(nn.Module):
         # (B, k, 1, T')
         # ====================================================
 
-        features = self.tsconv(
-            eeg
-        )
+        features = self.tsconv(eeg)
 
         # ====================================================
-        # 4. Flatten
+        # 4. 1×1 Feature Projection
+        # ====================================================
+        #
+        # (B, k, 1, T')
+        #
+        # →
+        #
+        # (B, k, 1, T')
+        #
+        # shape 不变，只在线性组合 k 个特征通道。
+        # ====================================================
+
+        features = self.patch_projection(features)
+
+        # ====================================================
+        # 5. Flatten
         # ====================================================
         #
         # (B, k, 1, T')
@@ -376,12 +402,10 @@ class EEGEncoder_TSConv_without_1x1Conv(nn.Module):
         # (B, flatten_dim)
         # ====================================================
 
-        features = features.flatten(
-            start_dim=1
-        )
+        features = features.flatten(start_dim=1)
 
         # ====================================================
-        # 5. MLP Projection Head
+        # 6. MLP Projection Head
         # ====================================================
         #
         # (B, flatten_dim)
@@ -400,8 +424,10 @@ class EEGEncoder_TSConv_without_1x1Conv(nn.Module):
         )
 
         # ====================================================
-        # 6. L2 Normalize
+        # 7. L2 Normalize
         # ====================================================
+        #
+        # 对 embedding 最后一维进行单位长度归一化:
         #
         # z_hat = z / ||z||_2
         #
@@ -410,11 +436,7 @@ class EEGEncoder_TSConv_without_1x1Conv(nn.Module):
         # ||z_hat||_2 ≈ 1
         #
         # 如果 Text embedding 同样经过 L2 normalization，
-        # 则:
-        #
-        # eeg_embedding @ text_embedding.T
-        #
-        # 就等价于 cosine similarity。
+        # 则两者点积等于 cosine similarity。
         # ====================================================
 
         embeddings = F.normalize(
@@ -439,8 +461,8 @@ if __name__ == "__main__":
     # EEG channels = 125
     # fixed EEG samples = 1500
     #
-    # n_times=1500 这里只用于演示。
-    # 正式训练时改成最终确定的统一 EEG 长度。
+    # n_times=1500 这里只是演示。
+    # 正式训练时改成你最终确定的统一 EEG 长度。
     # ========================================================
 
     batch_size = 8
@@ -457,20 +479,20 @@ if __name__ == "__main__":
     # 创建 EEG Encoder
     # ========================================================
 
-    model = EEGEncoder_TSConv_without_1x1Conv(
+    model = TSConvFixedEEGEncoder_with_1x1Conv(
 
         # EEG 输入
         n_chans=n_chans,
         n_times=n_times,
 
-        # NICE-inspired TSConv
+        # NICE TSConv
         k=40,
         m1=25,
         m2=51,
         s=5,
         drop_prob=0.5,
 
-        # MLP Projection Head
+        # Projection Head
         projection_hidden_dim=512,
 
         # Qwen3 / E5 / BGE 等 1024 维文本空间
