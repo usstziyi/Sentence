@@ -65,7 +65,7 @@ class TSConvAdaptiveEEGEncoder(nn.Module):
         m1: int = 25,
         m2: int = 51,
         s: int = 5,
-        adaptive_bins: int = 32,
+        adaptive_bins: int = 64,
         projection_hidden_dim: int = 512,
         embedding_dim: int = 1024,
         drop_prob: float = 0.5,
@@ -232,7 +232,7 @@ class TSConvAdaptiveEEGEncoder(nn.Module):
         #
         # 默认:
         #
-        # adaptive_bins = 32
+        # adaptive_bins = 64
         #
         # 因此不同长度 EEG 最终都能进入同一个 MLP。
         # ====================================================
@@ -255,11 +255,11 @@ class TSConvAdaptiveEEGEncoder(nn.Module):
         #
         # 默认:
         #
-        # 40 × 32 = 1280
+        # 40 × 64 = 2540
         #
         # MLP:
         #
-        # 1280 → 512 → 1024
+        # 2540 → 512 → 1024
         # ====================================================
 
         self.eeg_projection = nn.Sequential(
@@ -390,7 +390,7 @@ class TSConvAdaptiveEEGEncoder(nn.Module):
         #
         # 都变成:
         #
-        # (B, 40, 1, 32)
+        # (B, 40, 1, 64)
         # ====================================================
 
         features = self.temporal_pool(
@@ -409,11 +409,11 @@ class TSConvAdaptiveEEGEncoder(nn.Module):
         #
         # 默认:
         #
-        # (B, 40, 1, 32)
+        # (B, 40, 1, 64)
         #
         # →
         #
-        # (B, 1280)
+        # (B, 2540)
         # ====================================================
 
         features = features.flatten(
@@ -426,7 +426,7 @@ class TSConvAdaptiveEEGEncoder(nn.Module):
         #
         # 默认:
         #
-        # (B, 1280)
+        # (B, 2540)
         #
         # →
         #
@@ -486,8 +486,8 @@ if __name__ == "__main__":
         drop_prob=0.5,
 
         # Adaptive Pool
-        adaptive_bins=32,
-
+        adaptive_bins=64,
+        
         # MLP
         projection_hidden_dim=512,
 
