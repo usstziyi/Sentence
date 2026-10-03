@@ -255,11 +255,11 @@ class TSConvAdaptiveEEGEncoder(nn.Module):
         #
         # 默认:
         #
-        # 40 × 64 = 2540
+        # 40 × 64 = 2560
         #
         # MLP:
         #
-        # 2540 → 512 → 1024
+        # 2560 → 512 → 1024
         # ====================================================
 
         self.eeg_projection = nn.Sequential(
@@ -413,7 +413,7 @@ class TSConvAdaptiveEEGEncoder(nn.Module):
         #
         # →
         #
-        # (B, 2540)
+        # (B, 2560)
         # ====================================================
 
         features = features.flatten(
@@ -426,7 +426,7 @@ class TSConvAdaptiveEEGEncoder(nn.Module):
         #
         # 默认:
         #
-        # (B, 2540)
+        # (B, 2560)
         #
         # →
         #
