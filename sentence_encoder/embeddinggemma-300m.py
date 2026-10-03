@@ -18,8 +18,11 @@ from sentence_transformers import SentenceTransformer
 # 1. 加载 EmbeddingGemma
 # ============================================================
 
+# google/embeddinggemma-300m 是受限（gated）仓库，
+# hf-mirror 会返回 403 Forbidden。
+# 改用无需授权的完整镜像 unsloth/embeddinggemma-300m。
 model = SentenceTransformer(
-    "google/embeddinggemma-300m"
+    "unsloth/embeddinggemma-300m"
 )
 
 
